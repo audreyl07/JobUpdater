@@ -1,0 +1,4 @@
+companies:
+  - name: ciena
+    scanner: workday
+    url: https://ciena.wd5.myworkdayjobs.com/Careers

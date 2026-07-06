@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import app.main as main_module
+import main as main_module
 
 
 def test_parse_args_parses_cli_arguments(monkeypatch) -> None:

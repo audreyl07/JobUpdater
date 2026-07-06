@@ -3,17 +3,22 @@ filters:
     - python
     - backend
   exclude_keywords:
-    - internship
-    - contract
+    - senior
+    - manager
+    - director
+    - lead
   locations:
     - Toronto
     - Canada
+    - Ottawa
+    - Montreal 
   remote: true
   employment_types:
     - full-time
   intern_keywords:
     - intern
     - internship
+    - coop
   new_grad_keywords:
     - new grad
     - graduate

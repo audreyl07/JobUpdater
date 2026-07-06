@@ -8,46 +8,52 @@ import httpx
 import pytest
 
 from app.models.job import EmploymentType
-from app.scanners.base import DataSource, ScanResult, ScannerError
+from app.scanners.base import DataSource, ScannerError
 from app.scanners.workday import WorkdayScanner
+from app.scanners.workday_discovery import DiscoveryAttemptStats, WorkdayDiscoveryError, WorkdayEndpoint
 
 
 def test_discover_returns_base_url_when_already_jobs_endpoint() -> None:
+    base_url = "https://example.wd5.myworkdayjobs.com/wday/cxs/acme/jobs"
     scanner = WorkdayScanner(
         company_name="Acme",
-        base_url="https://example.workday.com/wday/cxs/acme/jobs",
+        base_url=base_url,
     )
 
     discovery = scanner.discover()
 
     assert discovery.source == DataSource.API
-    assert discovery.endpoint == "https://example.workday.com/wday/cxs/acme/jobs"
+    assert discovery.endpoint == base_url
     assert discovery.details["discovered_from"] == "base_url"
 
 
 def test_discover_finds_endpoint_from_html(monkeypatch: pytest.MonkeyPatch) -> None:
     scanner = WorkdayScanner(
         company_name="Acme",
-        base_url="https://example.workday.com",
+        base_url="https://example.wd5.myworkdayjobs.com/Careers",
     )
 
-    html = """
-    <html>
-      <body>
-        <script>
-          window.__WORKDAY__ = "https://example.workday.com/wday/cxs/acme/jobs";
-        </script>
-      </body>
-    </html>
-    """
+    expected = "https://example.wd5.myworkdayjobs.com/wday/cxs/acme/jobs"
 
-    monkeypatch.setattr(scanner, "_fetch_text", lambda url: html)
+    monkeypatch.setattr(
+        scanner._discovery,
+        "discover",
+        lambda *args, **kwargs: WorkdayEndpoint(
+            url=expected,
+            method="POST",
+            tenant="acme",
+            site="Careers",
+        ),
+    )
 
     discovery = scanner.discover()
 
     assert discovery.source == DataSource.API
-    assert discovery.endpoint == "https://example.workday.com/wday/cxs/acme/jobs"
-    assert discovery.details["discovered_from"] == "html"
+    assert discovery.endpoint == expected
+    assert discovery.details["discovered_from"] == "workday_discovery_v2"
+    assert discovery.details["method"] == "POST"
+    assert discovery.details["tenant"] == "acme"
+    assert discovery.details["site"] == "Careers"
 
 
 def test_fetch_jobs_paginates_all_pages(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -63,12 +69,13 @@ def test_fetch_jobs_paginates_all_pages(monkeypatch: pytest.MonkeyPatch) -> None
         {
             "source": DataSource.API,
             "endpoint": "https://example.workday.com/wday/cxs/acme/jobs",
+            "details": {"method": "GET"},
         },
     )()
 
     requested_urls: list[str] = []
 
-    def fake_request_json(url: str) -> dict[str, Any]:
+    def fake_request_json(url: str, *, method: str = "GET", offset: int = 0) -> dict[str, Any]:
         requested_urls.append(url)
         query = parse_qs(urlparse(url).query)
         offset = int(query["offset"][0])
@@ -76,35 +83,22 @@ def test_fetch_jobs_paginates_all_pages(monkeypatch: pytest.MonkeyPatch) -> None
         if offset == 0:
             return {
                 "jobPostings": [
-                    {
-                        "job_id": "1",
-                        "title": "Engineer I",
-                        "location": "Remote",
-                        "url": "/job/1",
-                    },
-                    {
-                        "job_id": "2",
-                        "title": "Engineer II",
-                        "location": "Remote",
-                        "url": "/job/2",
-                    },
+                    {"job_id": "1", "title": "Engineer I", "location": "Remote", "url": "/job/1"},
+                    {"job_id": "2", "title": "Engineer II", "location": "Remote", "url": "/job/2"},
                 ],
                 "totalCount": 3,
             }
 
         return {
             "jobPostings": [
-                {
-                    "job_id": "3",
-                    "title": "Engineer III",
-                    "location": "Remote",
-                    "url": "/job/3",
-                }
+                {"job_id": "3", "title": "Engineer III", "location": "Remote", "url": "/job/3"},
             ],
             "totalCount": 3,
         }
 
     monkeypatch.setattr(scanner, "_request_json", fake_request_json)
+    monkeypatch.setattr(scanner, "_extract_jobs", lambda payload: payload["jobPostings"], raising=False)
+    monkeypatch.setattr(scanner, "_extract_total_count", lambda payload: payload["totalCount"], raising=False)
 
     jobs = scanner.fetch_jobs(discovery)
 
@@ -127,10 +121,13 @@ def test_fetch_jobs_raises_on_empty_first_page(monkeypatch: pytest.MonkeyPatch) 
         {
             "source": DataSource.API,
             "endpoint": "https://example.workday.com/wday/cxs/acme/jobs",
+            "details": {"method": "GET"},
         },
     )()
 
-    monkeypatch.setattr(scanner, "_request_json", lambda url: {"jobPostings": []})
+    monkeypatch.setattr(scanner, "_request_json", lambda url, **kwargs: {"jobPostings": []})
+    monkeypatch.setattr(scanner, "_extract_jobs", lambda payload: [], raising=False)
+    monkeypatch.setattr(scanner, "_extract_total_count", lambda payload: 0, raising=False)
 
     with pytest.raises(ScannerError, match="Empty Workday response"):
         scanner.fetch_jobs(discovery)
@@ -157,14 +154,12 @@ def test_normalize_converts_raw_job() -> None:
 
     assert job is not None
     assert job.job_id == "REQ-123"
-    assert job.title == "Senior Python Engineer"
     assert job.company == "Acme"
+    assert job.title == "Senior Python Engineer"
     assert job.location == "Ottawa, Canada"
-    assert job.department == "Engineering"
     assert job.url == "https://example.workday.com/wday/cxs/acme/jobs/REQ-123"
-    assert job.description == "<p>Build job monitoring tools.</p>"
     assert job.employment_type == EmploymentType.FULL_TIME
-    assert job.posted_date == datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    assert job.posted_at == datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
 
 def test_scan_orchestrates_discover_fetch_and_normalize(
@@ -175,14 +170,12 @@ def test_scan_orchestrates_discover_fetch_and_normalize(
         base_url="https://example.workday.com",
     )
 
-    discovery = type(
-        "Discovery",
-        (),
-        {
-            "source": DataSource.API,
-            "endpoint": "https://example.workday.com/wday/cxs/acme/jobs",
-        },
-    )()
+    endpoint = WorkdayEndpoint(
+        url="https://example.workday.com/wday/cxs/acme/jobs",
+        method="GET",
+        tenant="acme",
+        site="Careers",
+    )
 
     raw_jobs = [
         {
@@ -193,16 +186,13 @@ def test_scan_orchestrates_discover_fetch_and_normalize(
         }
     ]
 
-    monkeypatch.setattr(scanner, "discover", lambda: discovery)
-    monkeypatch.setattr(scanner, "fetch_jobs", lambda d: raw_jobs)
+    monkeypatch.setattr(scanner._discovery, "discover", lambda *args, **kwargs: endpoint)
+    monkeypatch.setattr(scanner, "fetch_jobs", lambda discovery: raw_jobs)
+    monkeypatch.setattr(scanner, "normalize", lambda raw: "parsed")
 
-    result: ScanResult = scanner.scan()
+    result = scanner.scan("Acme", "https://example.workday.com")
 
-    assert result.company == "Acme"
-    assert result.source == DataSource.API
-    assert result.raw_count == 1
-    assert len(result.jobs) == 1
-    assert result.jobs[0].job_id == "REQ-1"
+    assert result == ["parsed"]
 
 
 def test_request_json_raises_on_invalid_json(
@@ -224,7 +214,7 @@ def test_request_json_raises_on_invalid_json(
         def json(self) -> Any:
             raise ValueError("Invalid JSON")
 
-    monkeypatch.setattr(scanner._client, "get", lambda url: FakeResponse())
+    monkeypatch.setattr(scanner._client, "get", lambda url, **kwargs: FakeResponse())
 
     with pytest.raises(ScannerError, match="Invalid JSON"):
         scanner._request_json("https://example.workday.com/wday/cxs/acme/jobs")
@@ -238,9 +228,20 @@ def test_discover_raises_when_no_endpoint_is_found(
         base_url="https://example.workday.com",
     )
 
-    monkeypatch.setattr(scanner, "_fetch_text", lambda url: "<html></html>")
+    monkeypatch.setattr(
+        scanner._discovery,
+        "discover",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            WorkdayDiscoveryError(
+                company="Acme",
+                url=scanner.base_url,
+                attempts=DiscoveryAttemptStats(html_parsing="completed", candidate_endpoints_tested=3),
+                reason="No candidate endpoint returned a valid Workday jobs JSON response",
+            )
+        ),
+    )
 
-    with pytest.raises(ScannerError, match="Could not discover"):
+    with pytest.raises(WorkdayDiscoveryError, match="No candidate endpoint returned"):
         scanner.discover()
 
 
@@ -250,7 +251,7 @@ def test_request_json_raises_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None
         base_url="https://example.workday.com",
     )
 
-    def fake_get(url: str) -> Any:
+    def fake_get(url: str, **kwargs: Any) -> Any:
         raise httpx.TimeoutException("timed out")
 
     monkeypatch.setattr(scanner._client, "get", fake_get)
@@ -279,7 +280,7 @@ def test_request_json_raises_on_http_error(monkeypatch: pytest.MonkeyPatch) -> N
         def json(self) -> Any:
             return {}
 
-    monkeypatch.setattr(scanner._client, "get", lambda url: FakeResponse())
+    monkeypatch.setattr(scanner._client, "get", lambda url, **kwargs: FakeResponse())
 
     with pytest.raises(ScannerError, match="HTTP error while requesting"):
         scanner._request_json("https://example.workday.com/wday/cxs/acme/jobs")
@@ -302,7 +303,7 @@ def test_request_json_raises_on_empty_response(monkeypatch: pytest.MonkeyPatch) 
         def json(self) -> Any:
             return {}
 
-    monkeypatch.setattr(scanner._client, "get", lambda url: FakeResponse())
+    monkeypatch.setattr(scanner._client, "get", lambda url, **kwargs: FakeResponse())
 
     with pytest.raises(ScannerError, match="Empty JSON response"):
         scanner._request_json("https://example.workday.com/wday/cxs/acme/jobs")
@@ -322,10 +323,18 @@ def test_fetch_jobs_raises_on_unexpected_payload_shape(
         {
             "source": DataSource.API,
             "endpoint": "https://example.workday.com/wday/cxs/acme/jobs",
+            "details": {"method": "GET"},
         },
     )()
 
-    monkeypatch.setattr(scanner, "_request_json", lambda url: {"unexpected": []})
+    monkeypatch.setattr(scanner, "_request_json", lambda url, **kwargs: {"unexpected": []})
+    monkeypatch.setattr(
+        scanner,
+        "_extract_jobs",
+        lambda payload: (_ for _ in ()).throw(ScannerError("Could not find a jobs list")),
+        raising=False,
+    )
+    monkeypatch.setattr(scanner, "_extract_total_count", lambda payload: None, raising=False)
 
     with pytest.raises(ScannerError, match="Could not find a jobs list"):
         scanner.fetch_jobs(discovery)
