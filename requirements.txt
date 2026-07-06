@@ -1,0 +1,10 @@
+httpx[http2]>=0.27
+playwright>=1.44
+SQLAlchemy>=2.0
+psycopg2-binary>=2.9
+pydantic>=2.7
+PyYAML>=6.0
+tenacity>=8.2
+pytest>=8.0
+pytest-mock>=3.14
+respx>=0.21

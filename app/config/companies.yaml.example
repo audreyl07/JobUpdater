@@ -1,0 +1,8 @@
+companies:
+  - name: Nokia
+    scanner: workday
+    url: https://example.com/nokia-careers
+
+  - name: Kinaxis
+    scanner: workday
+    url: https://example.com/kinaxis-careers
