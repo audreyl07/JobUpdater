@@ -1,0 +1,22 @@
+filters:
+  include_keywords:
+    - python
+    - backend
+  exclude_keywords:
+    - internship
+    - contract
+  locations:
+    - Toronto
+    - Canada
+  remote: true
+  employment_types:
+    - full-time
+  intern_keywords:
+    - intern
+    - internship
+  new_grad_keywords:
+    - new grad
+    - graduate
+  junior_keywords:
+    - junior
+    - entry level

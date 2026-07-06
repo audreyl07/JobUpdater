@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import argparses
+import argparse
 
 from app.runner import run_scanner
 from app.scanners.workday import WorkdayScanner
