@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from career_monitor.config.exceptions import ConfigurationError
-from career_monitor.config.loader import ConfigLoader
+from app.config.exceptions import ConfigurationError
+from app.config.loader import ConfigLoader
 
 
 def test_load_valid_config(tmp_path: Path) -> None:
