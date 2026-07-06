@@ -9,7 +9,7 @@ logger = get_logger(__name__)
 def run_scanner(scanner: BaseScanner) -> ScanResult:
     """Run a scanner and return its normalized results."""
     logger.info("Running scanner company=%s", scanner.company_name)
-    result = scanner.scan()
+    result = scanner.scan(scanner.company_name, scanner.base_url)
     logger.info(
         "Scanner finished company=%s jobs=%s raw_count=%s",
         result.company,

@@ -159,7 +159,7 @@ def test_normalize_converts_raw_job() -> None:
     assert job.location == "Ottawa, Canada"
     assert job.url == "https://example.workday.com/wday/cxs/acme/jobs/REQ-123"
     assert job.employment_type == EmploymentType.FULL_TIME
-    assert job.posted_at == datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    assert job.posted_date == datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
 
 def test_scan_orchestrates_discover_fetch_and_normalize(

@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 @dataclass(slots=True)
 class WorkdayEndpoint:
     """Resolved Workday API endpoint."""
-
     url: str
     method: str
     tenant: str
@@ -26,7 +25,6 @@ class WorkdayEndpoint:
 @dataclass(slots=True)
 class WorkdayHTMLMetadata:
     """Metadata extracted from a Workday career page HTML document."""
-
     tenant_candidates: list[str] = field(default_factory=list)
     site_candidates: list[str] = field(default_factory=list)
     api_paths: list[str] = field(default_factory=list)
@@ -37,7 +35,6 @@ class WorkdayHTMLMetadata:
 @dataclass(slots=True)
 class DiscoveryAttemptStats:
     """Diagnostic counters for Workday discovery."""
-
     html_parsing: str = "pending"
     candidate_endpoints_tested: int = 0
     get_attempts_failed: int = 0
@@ -93,7 +90,15 @@ class WorkdayDiscovery:
         client: httpx.Client | None = None,
     ) -> WorkdayEndpoint:
         """Discover a working Workday endpoint for a career page."""
+
         logger.info("Starting Workday discovery")
+
+        # Case: URL already points to a Workday jobs endpoint
+        if "/wday/cxs/" in url and url.endswith("/jobs"):
+            tenant = self._tenant_from_endpoint(url)
+            site = self._site_from_endpoint(url)
+            return WorkdayEndpoint(url=url, method="POST", tenant=tenant, site=site)
+
         attempts = DiscoveryAttemptStats()
 
         own_client = client is None
@@ -116,18 +121,14 @@ class WorkdayDiscovery:
 
             for candidate in candidates:
                 attempts.candidate_endpoints_tested += 1
-                logger.debug("Generated candidate: %s", candidate.url)
-
                 result = self.probe_endpoint(http_client, candidate)
+
                 if result is not None:
                     if result.method == "POST":
                         attempts.post_attempts_succeeded += 1
-
-                    logger.info("Valid Workday API discovered: %s", result.url)
                     return result
 
                 attempts.get_attempts_failed += 1
-                logger.warning("Candidate rejected: %s", candidate.url)
 
             raise WorkdayDiscoveryError(
                 company=company or self._company_from_url(url),
@@ -135,6 +136,7 @@ class WorkdayDiscovery:
                 attempts=attempts,
                 reason="No candidate endpoint returned a valid Workday jobs JSON response",
             )
+
         finally:
             if own_client:
                 http_client.close()
@@ -142,7 +144,6 @@ class WorkdayDiscovery:
     def extract_html_metadata(self, html: str) -> WorkdayHTMLMetadata:
         """Extract Workday-related metadata from career-page HTML."""
         text = unescape(html)
-
         metadata = WorkdayHTMLMetadata()
 
         endpoint_patterns = [
@@ -191,11 +192,10 @@ class WorkdayDiscovery:
                 if path not in metadata.api_paths:
                     metadata.api_paths.append(path)
 
-        # Keep a few snippets for debugging.
         for needle in ("/wday/cxs/", "jobPostings", "jobs", "tenant", "site"):
             if needle.lower() in text.lower():
                 idx = text.lower().find(needle.lower())
-                snippet = text[max(0, idx - 120) : idx + 220]
+                snippet = text[max(0, idx - 120): idx + 220]
                 metadata.raw_snippets.append(snippet)
                 if len(metadata.raw_snippets) >= 5:
                     break
@@ -209,7 +209,7 @@ class WorkdayDiscovery:
         site_candidates: Iterable[str],
         metadata: WorkdayHTMLMetadata,
     ) -> Iterable[WorkdayEndpoint]:
-        """Generate Workday endpoint candidates from metadata and URL heuristics."""
+
         parsed = urlparse(career_url)
         host = parsed.netloc
         base = f"{parsed.scheme}://{host}"
@@ -230,10 +230,9 @@ class WorkdayDiscovery:
 
         seen: set[tuple[str, str, str, str]] = set()
 
-        # Directly discovered URLs from HTML.
         for endpoint_url in endpoint_urls:
             full_url = self._normalize_endpoint_url(base, endpoint_url)
-            for method in ("GET", "POST"):
+            for method in ("POST", "GET"):
                 item = WorkdayEndpoint(
                     url=full_url,
                     method=method,
@@ -245,12 +244,11 @@ class WorkdayDiscovery:
                     seen.add(key)
                     yield item
 
-        # Heuristic candidates.
         for tenant in tenants:
             for site in sites:
                 for variant in self._site_variants(site):
                     url = f"{base}/wday/cxs/{tenant}/{variant}/jobs"
-                    for method in ("GET", "POST"):
+                    for method in ("POST", "GET"):
                         item = WorkdayEndpoint(url=url, method=method, tenant=tenant, site=site)
                         key = (item.url, item.method, item.tenant, item.site)
                         if key not in seen:
@@ -258,34 +256,30 @@ class WorkdayDiscovery:
                             yield item
 
     def probe_endpoint(self, client: httpx.Client, candidate: WorkdayEndpoint) -> WorkdayEndpoint | None:
-        """Probe a candidate endpoint with GET, then POST."""
-        response = self._request(client, candidate.url, "GET")
-        if self.validate_response(response):
-            return WorkdayEndpoint(
-                url=candidate.url,
-                method="GET",
-                tenant=candidate.tenant,
-                site=candidate.site,
+        methods = [
+            candidate.method.upper(),
+            "POST" if candidate.method.upper() == "GET" else "GET",
+        ]
+
+        for method in methods:
+            response = self._request(
+                client,
+                candidate.url,
+                method,
+                json={"limit": 1, "offset": 0},
             )
 
-        response = self._request(
-            client,
-            candidate.url,
-            "POST",
-            json={"limit": 1, "offset": 0},
-        )
-        if self.validate_response(response):
-            return WorkdayEndpoint(
-                url=candidate.url,
-                method="POST",
-                tenant=candidate.tenant,
-                site=candidate.site,
-            )
+            if self.validate_response(response):
+                return WorkdayEndpoint(
+                    url=candidate.url,
+                    method=method,
+                    tenant=candidate.tenant,
+                    site=candidate.site,
+                )
 
         return None
 
     def validate_response(self, response: httpx.Response) -> bool:
-        """Validate that the response is a usable Workday jobs JSON payload."""
         if response.status_code != 200:
             return False
 
@@ -311,24 +305,20 @@ class WorkdayDiscovery:
         return self._contains_job_fields(payload)
 
     def _fetch_html(self, client: httpx.Client, url: str) -> str:
-        response = client.get(url, headers={"Accept": "text/html,application/xhtml+xml"})
+        logger.debug("Fetching Workday HTML url=%s", url)
+        response = client.get(
+            url,
+            headers={"Accept": "text/html,application/xhtml+xml"},
+        )
         response.raise_for_status()
         return response.text
 
-    def _request(
-        self,
-        client: httpx.Client,
-        url: str,
-        method: str,
-        *,
-        json: dict[str, Any] | None = None,
-    ) -> httpx.Response:
+    def _request(self, client: httpx.Client, url: str, method: str, *, json: dict[str, Any] | None = None) -> httpx.Response:
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
-        logger.debug("Probing Workday endpoint: %s %s", method, url)
-        if method == "GET":
+        if method.upper() == "GET":
             return client.get(url, headers=headers)
         return client.post(url, headers=headers, json=json)
 
@@ -348,7 +338,7 @@ class WorkdayDiscovery:
             for item in payload:
                 if isinstance(item, dict):
                     keys = {str(key).lower() for key in item.keys()}
-                    if keys.intersection({"title", "jobid", "job_id", "externalid", "postedate", "location"}):
+                    if keys.intersection({"title", "jobid", "job_id", "externalid", "posteddate", "location"}):
                         return True
                     if "job" in keys or "posting" in keys:
                         return True

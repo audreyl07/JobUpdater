@@ -46,7 +46,7 @@ def main() -> int:
         page_size=args.page_size,
     )
 
-    result = run_scanner(scanner)
+    result = run_scanner(scanner, company_name=args.company_name, base_url=args.base_url)
 
     logger.info(
         "Completed scan company=%s jobs=%s",
