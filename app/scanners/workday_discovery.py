@@ -82,64 +82,65 @@ class WorkdayDiscovery:
     def __init__(self, *, timeout: float = 15.0) -> None:
         self._timeout = timeout
 
-    def discover(
-        self,
-        url: str,
-        *,
-        company: str | None = None,
-        client: httpx.Client | None = None,
-    ) -> WorkdayEndpoint:
-        """Discover a working Workday endpoint for a career page."""
+    def discover(self):
+        """Wrap WorkdayDiscovery into a DiscoveryResult-like object."""
+        parsed = urlparse(self.base_url)
+        path = parsed.path.rstrip("/")
 
-        logger.info("Starting Workday discovery")
+        if "/wday/cxs/" in path and path.endswith("/jobs"):
+            self._warm_up_session(parsed)
+            return type(
+                "Discovery",
+                (),
+                {
+                    "source": DataSource.API,
+                    "endpoint": self.base_url,
+                    "details": {
+                        "discovered_from": "base_url",
+                        "method": "POST",
+                    },
+                },
+            )()
 
-        # Case: URL already points to a Workday jobs endpoint
-        if "/wday/cxs/" in url and url.endswith("/jobs"):
-            tenant = self._tenant_from_endpoint(url)
-            site = self._site_from_endpoint(url)
-            return WorkdayEndpoint(url=url, method="POST", tenant=tenant, site=site)
+        endpoint: WorkdayEndpoint = self._discovery.discover(
+            self.base_url,
+            company=self.company_name,
+            client=self._client,
+        )
 
-        attempts = DiscoveryAttemptStats()
+        return type(
+            "Discovery",
+            (),
+            {
+                "source": DataSource.API,
+                "endpoint": endpoint.url,
+                "details": {
+                    "discovered_from": "workday_discovery_v2",
+                    "method": endpoint.method,
+                    "tenant": endpoint.tenant,
+                    "site": endpoint.site,
+                },
+            },
+        )()
 
-        own_client = client is None
-        http_client = client or httpx.Client(timeout=self._timeout, follow_redirects=True)
-
-        try:
-            try:
-                html = self._fetch_html(http_client, url)
-                attempts.html_parsing = "completed"
-            except httpx.HTTPError as exc:
-                logger.warning("Career page fetch failed; continuing with heuristics url=%s error=%s", url, exc)
-                html = ""
-                attempts.html_parsing = "failed"
-
-            metadata = self.extract_html_metadata(html) if html else WorkdayHTMLMetadata()
-
-            tenant_candidates = self._tenant_candidates(url, metadata)
-            site_candidates = self._site_candidates(url, metadata)
-            candidates = list(self.generate_candidates(url, tenant_candidates, site_candidates, metadata))
-
-            for candidate in candidates:
-                attempts.candidate_endpoints_tested += 1
-                result = self.probe_endpoint(http_client, candidate)
-
-                if result is not None:
-                    if result.method == "POST":
-                        attempts.post_attempts_succeeded += 1
-                    return result
-
-                attempts.get_attempts_failed += 1
-
-            raise WorkdayDiscoveryError(
-                company=company or self._company_from_url(url),
-                url=url,
-                attempts=attempts,
-                reason="No candidate endpoint returned a valid Workday jobs JSON response",
-            )
-
-        finally:
-            if own_client:
-                http_client.close()
+def _warm_up_session(self, parsed) -> None:
+    """Visit the human-facing career page first so Workday sets session cookies."""
+    tenant, site = self._parse_tenant_site(self.base_url)
+    warm_up_url = f"{parsed.scheme}://{parsed.netloc}/en-US/{site}"
+    try:
+        self._client.get(
+            warm_up_url,
+            headers={
+                "Accept": "text/html,application/xhtml+xml",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+                ),
+            },
+        )
+    except httpx.HTTPError:
+        # Non-fatal: if the warm-up fails, still attempt the API call directly.
+        pass
 
     def extract_html_metadata(self, html: str) -> WorkdayHTMLMetadata:
         """Extract Workday-related metadata from career-page HTML."""
@@ -314,13 +315,23 @@ class WorkdayDiscovery:
         return response.text
 
     def _request(self, client: httpx.Client, url: str, method: str, *, json: dict[str, Any] | None = None) -> httpx.Response:
+        tenant = self._tenant_from_endpoint(url)
+        site = self._site_from_endpoint(url) or "Careers"
+        netloc = urlparse(url).netloc
+
         headers = {
+            
             "Accept": "application/json",
             "Content-Type": "application/json",
-        }
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        ),
+        "Referer": f"https://{netloc}/en-US/{site}",
+    }
         if method.upper() == "GET":
             return client.get(url, headers=headers)
-        return client.post(url, headers=headers, json=json)
+
 
     def _contains_job_fields(self, payload: Any) -> bool:
         if isinstance(payload, dict):

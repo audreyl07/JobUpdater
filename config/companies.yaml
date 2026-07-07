@@ -2,3 +2,7 @@ companies:
   - name: ciena
     scanner: workday
     url: https://ciena.wd5.myworkdayjobs.com/wday/cxs/ciena/Careers/jobs
+
+  - name: NAV Canada
+    scanner: workday
+    url: https://navcanada.wd10.myworkdayjobs.com/wday/cxs/navcanada/NAV_Careers/jobs

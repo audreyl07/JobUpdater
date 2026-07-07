@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--page-size",
         type=int,
-        default=50,
+        default=20,
         help="Number of jobs to request per page.",
     )
     parser.add_argument(
@@ -43,10 +43,10 @@ def main() -> int:
         company_name=args.company_name,
         base_url=args.base_url,
         timeout=args.timeout,
-        page_size=args.page_size,
+        page_size=args.page_size
     )
 
-    result = run_scanner(scanner, company_name=args.company_name, base_url=args.base_url)
+    result = run_scanner(scanner)
 
     logger.info(
         "Completed scan company=%s jobs=%s",

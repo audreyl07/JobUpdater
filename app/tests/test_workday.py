@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from app.models.job import EmploymentType
-from app.scanners.base import DataSource, ScannerError
+from app.scanners.base import DataSource, ScanResult, ScannerError
 from app.scanners.workday import WorkdayScanner
 from app.scanners.workday_discovery import DiscoveryAttemptStats, WorkdayDiscoveryError, WorkdayEndpoint
 
@@ -192,7 +192,10 @@ def test_scan_orchestrates_discover_fetch_and_normalize(
 
     result = scanner.scan("Acme", "https://example.workday.com")
 
-    assert result == ["parsed"]
+    assert isinstance(result, ScanResult)
+    assert result.company == "Acme"
+    assert result.jobs == ["parsed"]
+    assert result.raw_count == 1
 
 
 def test_request_json_raises_on_invalid_json(

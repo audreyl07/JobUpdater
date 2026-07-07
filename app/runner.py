@@ -16,4 +16,4 @@ def run_scanner(scanner: BaseScanner) -> ScanResult:
         len(result.jobs),
         result.raw_count,
     )
-    return result
+    return result 

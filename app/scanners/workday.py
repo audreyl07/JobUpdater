@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import json
+import re
 from datetime import datetime, timezone
 from typing import Any, List
-from urllib.parse import urlencode
+from urllib.parse import urlparse
 
-import httpx
+from playwright.sync_api import sync_playwright
 
-from app.models.job import Job, EmploymentType
-from app.scanners.base import DataSource, ScannerError
+from app.models.job import EmploymentType, Job
+from app.scanners.base import DataSource, ScanResult, ScannerError
 from app.scanners.workday_discovery import WorkdayDiscovery, WorkdayEndpoint
 
 
@@ -25,35 +27,27 @@ class WorkdayScanner:
         self.company_name = company_name
         self.base_url = base_url
         self.page_size = page_size
-        self._client = httpx.Client(timeout=timeout, follow_redirects=True)
+        self._timeout_ms = timeout * 1000
         self._discovery = WorkdayDiscovery(timeout=timeout)
 
-    # ----------------------------------------------------------------------
-    # DISCOVER
-    # ----------------------------------------------------------------------
     def discover(self):
-        """Wrap WorkdayDiscovery into a DiscoveryResult-like object."""
+        parsed = urlparse(self.base_url)
+        path = parsed.path.rstrip("/")
 
-        # Case: base_url already points to jobs endpoint
-        if "/wday/cxs/" in self.base_url and self.base_url.endswith("/jobs"):
+        if "/wday/cxs/" in path and path.endswith("/jobs"):
             return type(
                 "Discovery",
                 (),
                 {
                     "source": DataSource.API,
                     "endpoint": self.base_url,
-                    "details": {
-                        "discovered_from": "base_url",
-                        "method": "POST",
-                    },
+                    "details": {"discovered_from": "base_url", "method": "POST"},
                 },
             )()
 
-        # Otherwise use WorkdayDiscovery
         endpoint: WorkdayEndpoint = self._discovery.discover(
             self.base_url,
             company=self.company_name,
-            client=self._client,
         )
 
         return type(
@@ -71,113 +65,115 @@ class WorkdayScanner:
             },
         )()
 
-    # ----------------------------------------------------------------------
-    # REQUEST JSON
-    # ----------------------------------------------------------------------
-    def _request_json(self, url: str, *, method: str = "GET", offset: int = 0) -> dict[str, Any]:
-        """Perform GET or POST and return JSON with strong error handling."""
+    def _parse_tenant_site(self, url: str) -> tuple[str, str]:
+        match = re.search(r"/wday/cxs/([^/]+)/([^/]+)/jobs", url, flags=re.IGNORECASE)
+        if not match:
+            return "", "Careers"
+        return match.group(1), match.group(2)
 
-        try:
-            if method.upper() == "GET":
-                response = self._client.get(url)
-            else:
-                response = self._client.post(url, json={"limit": self.page_size, "offset": offset})
-
-            response.raise_for_status()
-
-        except httpx.TimeoutException:
-            raise ScannerError("Timeout while requesting Workday API")
-
-        except httpx.HTTPStatusError:
-            raise ScannerError("HTTP error while requesting Workday API")
-
-        # Empty response
-        if not response.content:
-            raise ScannerError("Empty JSON response")
-
-        # Invalid JSON
-        try:
-            return response.json()
-        except Exception:
-            raise ScannerError("Invalid JSON")
-
-    # ----------------------------------------------------------------------
-    # FETCH JOBS
-    # ----------------------------------------------------------------------
     def fetch_jobs(self, discovery) -> List[dict[str, Any]]:
-        """Fetch all jobs using pagination."""
-
+        """Fetch all jobs using pagination, via a single Playwright browser session."""
         endpoint = discovery.endpoint
-        method = discovery.details.get("method", "GET")
+        tenant, site = self._parse_tenant_site(endpoint)
+        netloc = urlparse(endpoint).netloc
 
         jobs: List[dict[str, Any]] = []
 
-        # First page
-        url = f"{endpoint}?{urlencode({'limit': self.page_size, 'offset': 0})}"
-        payload = self._request_json(url, method=method, offset=0)
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context()
+            page = context.new_page()
 
-        try:
-            first_page_jobs = self._extract_jobs(payload)
-            total = self._extract_total_count(payload)
-        except Exception as exc:
-            raise ScannerError(str(exc))
+            # Warm up the session on the real careers page first
+            page.goto(f"https://{netloc}/en-US/{site}", wait_until="networkidle", timeout=self._timeout_ms)
 
-        if not first_page_jobs:
-            raise ScannerError("Empty Workday response")
+            offset = 0
+            payload = self._request_json(page, endpoint, offset=offset)
 
-        jobs.extend(first_page_jobs)
+            try:
+                first_page_jobs = self._extract_jobs(payload)
+                total = self._extract_total_count(payload)
+            except Exception as exc:
+                browser.close()
+                raise ScannerError(str(exc)) from exc
 
-        # Additional pages
-        offset = self.page_size
-        while offset < total:
-            url = f"{endpoint}?{urlencode({'limit': self.page_size, 'offset': offset})}"
-            payload = self._request_json(url, method=method, offset=offset)
+            if not first_page_jobs:
+                browser.close()
+                raise ScannerError("Empty Workday response")
 
-            page_jobs = self._extract_jobs(payload)
-            jobs.extend(page_jobs)
+            jobs.extend(first_page_jobs)
 
-            offset += self.page_size
+            offset = self.page_size
+            while offset < total:
+                payload = self._request_json(page, endpoint, offset=offset)
+                page_jobs = self._extract_jobs(payload)
+                jobs.extend(page_jobs)
+                offset += self.page_size
+
+            browser.close()
 
         return jobs
 
-    # ----------------------------------------------------------------------
-    # EXTRACTORS
-    # ----------------------------------------------------------------------
+    def _request_json(self, page, url: str, *, offset: int = 0) -> dict:
+        try:
+            response = page.request.post(
+                url,
+                data=json.dumps({
+                    "appliedFacets": {},
+                    "limit": self.page_size,
+                    "offset": offset,
+                    "searchText": "",
+                }),
+                headers={"Content-Type": "application/json"},
+                timeout=self._timeout_ms,
+            )
+
+            if response.status != 200:
+                raise ScannerError(
+                    f"HTTP error while requesting Workday API: {response.status} {response.text()}"
+                )
+
+            try:
+                return response.json()
+            except ValueError as exc:
+                raise ScannerError("Invalid JSON response from Workday API") from exc
+
+        except ScannerError:
+            raise
+        except Exception as exc:
+            raise ScannerError(f"Request error while requesting Workday API: {exc}") from exc
+
     def _extract_jobs(self, payload: dict[str, Any]) -> List[dict[str, Any]]:
         if "jobPostings" in payload:
             return payload["jobPostings"]
         raise ScannerError("Could not find a jobs list")
 
     def _extract_total_count(self, payload: dict[str, Any]) -> int:
-        if "totalCount" in payload:
-            return int(payload["totalCount"])
+        if "total" in payload:
+            return int(payload["total"])
         raise ScannerError("Could not determine total job count")
 
-    # ----------------------------------------------------------------------
-    # NORMALIZE
-    # ----------------------------------------------------------------------
     def normalize(self, raw: dict[str, Any]) -> Job | None:
-        """Convert raw Workday job into our Job model."""
-
-        job_id = raw.get("job_id") or raw.get("jobId")
+        """Convert raw Workday job (list-endpoint shape) into our Job model."""
+        external_path = raw.get("externalPath")
         title = raw.get("title")
-        location = raw.get("location")
-        url_path = raw.get("url") or raw.get("jobUrl")
 
-        if not job_id or not title or not url_path:
+        if not external_path or not title:
             return None
 
-        full_url = url_path
+        # Job ID comes from bulletFields (typically the requisition number) or externalPath
+        bullet_fields = raw.get("bulletFields") or []
+        job_id = bullet_fields[0] if bullet_fields else external_path
+
+        full_url = external_path
         if full_url.startswith("/"):
-            full_url = self.base_url.rstrip("/") + full_url
+            netloc_base = self.base_url.split("/wday/cxs/")[0]
+            full_url = f"{netloc_base}/en-US/{self._parse_tenant_site(self.base_url)[1]}{full_url}"
 
-        posted_raw = raw.get("postedDate")
+        location = raw.get("locationsText")
+
+        # postedOn is a relative string like "Posted 6 Days Ago" — not a parseable date
         posted_at = None
-        if posted_raw:
-            posted_at = datetime.fromisoformat(posted_raw.replace("Z", "+00:00")).astimezone(timezone.utc)
-
-        employment_raw = raw.get("employmentType", "")
-        employment_type = EmploymentType.FULL_TIME if "Full" in employment_raw else EmploymentType.UNKNOWN
 
         return Job(
             job_id=job_id,
@@ -185,16 +181,28 @@ class WorkdayScanner:
             title=title,
             location=location,
             url=full_url,
-            description=raw.get("description", ""),
-            department=raw.get("department", ""),
+            description="",
+            department="",
             posted_date=posted_at,
-            employment_type=employment_type,
+            employment_type=EmploymentType.UNKNOWN,
         )
 
-    # ----------------------------------------------------------------------
-    # SCAN
-    # ----------------------------------------------------------------------
-    def scan(self, company_name: str, base_url: str):
+    def scan(self, company_name: str, base_url: str) -> ScanResult:
+        self.company_name = company_name
+        self.base_url = base_url
+
         discovery = self.discover()
         raw_jobs = self.fetch_jobs(discovery)
-        return [self.normalize(job) for job in raw_jobs if self.normalize(job) is not None]
+
+        jobs: list[Job] = []
+        for raw_job in raw_jobs:
+            job = self.normalize(raw_job)
+            if job is not None:
+                jobs.append(job)
+
+        return ScanResult(
+            company=self.company_name,
+            jobs=jobs,
+            raw_count=len(raw_jobs),
+            source=discovery.source,
+        )
