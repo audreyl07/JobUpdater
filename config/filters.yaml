@@ -5,7 +5,10 @@ filters:
     - java
     - engineer
     - c/c++
-
+    - software
+    - developer
+    - technical 
+    - full stack 
   exclude_keywords:
     - senior
     - manager

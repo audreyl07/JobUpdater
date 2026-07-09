@@ -7,3 +7,14 @@ companies:
     scanner: workday
     url: https://navcanada.wd10.myworkdayjobs.com/wday/cxs/navcanada/NAV_Careers/jobs
   
+  - name: BMO 
+    scanner: workday 
+    url: https://bmo.wd3.myworkdayjobs.com/wday/cxs/bmo/External/jobs
+
+  - name: TD Bank 
+    scanner: workday 
+    url: https://td.wd3.myworkdayjobs.com/wday/cxs/td/TD_Bank_Careers/jobs
+  
+  - name: CIBC 
+    scanner: workday 
+    url: https://cibc.wd3.myworkdayjobs.com/wday/cxs/cibc/search/jobs
