@@ -7,13 +7,14 @@ from typing import Any, List
 from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
+from app.scanners.base import BaseScanner, DataSource, ScanResult, ScannerError
 
 from app.models.job import EmploymentType, Job
 from app.scanners.base import DataSource, ScanResult, ScannerError
 from app.scanners.workday_discovery import WorkdayDiscovery, WorkdayEndpoint
 
 
-class WorkdayScanner:
+class WorkdayScanner(BaseScanner):
     """Scanner for Workday job listings."""
 
     def __init__(
@@ -155,6 +156,7 @@ class WorkdayScanner:
 
     def normalize(self, raw: dict[str, Any]) -> Job | None:
         """Convert raw Workday job (list-endpoint shape) into our Job model."""
+        print(json.dumps(raw, indent=2))
         external_path = raw.get("externalPath")
         title = raw.get("title")
 
@@ -187,22 +189,4 @@ class WorkdayScanner:
             employment_type=EmploymentType.UNKNOWN,
         )
 
-    def scan(self, company_name: str, base_url: str) -> ScanResult:
-        self.company_name = company_name
-        self.base_url = base_url
-
-        discovery = self.discover()
-        raw_jobs = self.fetch_jobs(discovery)
-
-        jobs: list[Job] = []
-        for raw_job in raw_jobs:
-            job = self.normalize(raw_job)
-            if job is not None:
-                jobs.append(job)
-
-        return ScanResult(
-            company=self.company_name,
-            jobs=jobs,
-            raw_count=len(raw_jobs),
-            source=discovery.source,
-        )
+    

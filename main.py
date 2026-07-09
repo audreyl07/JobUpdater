@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
-from app.runner import run_scanner
+from app.config.loader import ConfigLoader
+from app.filters.engine import FilterEngine
+from app.filters.loader import FilterConfigLoader
+from app.scanners.manager import ScannerManager
 from app.scanners.workday import WorkdayScanner
 from app.utils.logger import get_logger
 
@@ -11,49 +15,84 @@ logger = get_logger(__name__)
 
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
-    parser = argparse.ArgumentParser(description="Run a Workday job scan.")
+    parser = argparse.ArgumentParser(description="Run Career Monitor scanners.")
+
     parser.add_argument(
-        "company_name",
-        help="Display name for the company being scanned.",
+        "--config",
+        type=Path,
+        default=Path("config/companies.yaml"),
+        help="Path to the companies YAML configuration.",
     )
+
     parser.add_argument(
-        "base_url",
-        help="Workday careers page or jobs API URL.",
+        "--filters",
+        type=Path,
+        default=Path("config/filters.yaml"),
+        help="Path to the filters YAML configuration.",
     )
+
     parser.add_argument(
         "--page-size",
         type=int,
         default=20,
-        help="Number of jobs to request per page.",
     )
+
     parser.add_argument(
         "--timeout",
         type=float,
         default=30.0,
-        help="HTTP timeout in seconds.",
     )
+
     return parser.parse_args()
 
 
 def main() -> int:
-    """Run a single Workday scan."""
     args = parse_args()
 
-    scanner = WorkdayScanner(
-        company_name=args.company_name,
-        base_url=args.base_url,
-        timeout=args.timeout,
-        page_size=args.page_size
-    )
+    # Load the configuration
+    loader = ConfigLoader()
+    config = loader.load(args.config)
 
-    result = run_scanner(scanner)
+    filter_config = FilterConfigLoader().load(args.filters)
+
+    # Register scanner factories
+    scanner_factories = {
+        "workday": lambda company: WorkdayScanner(
+            company_name=company.name,
+            base_url=company.url,
+            page_size=args.page_size,
+            timeout=args.timeout,
+        )
+    }
+
+    # Create the manager
+    manager = ScannerManager(scanner_factories)
+
+    # Scan every configured company
+    jobs = manager.run(config)
+
+    filtered_jobs = FilterEngine.from_config(filter_config).filter_jobs(jobs)
+
+    print("\n============================")
+    print("Career Monitor")
+    print("============================")
+    print(f"Companies scanned : {len(config.companies)}")
+    print(f"Jobs found        : {len(jobs)}")
+    print(f"Jobs accepted     : {len(filtered_jobs)}")
+    print()
+
+    for job in filtered_jobs:
+        print(f"{job.title}")
+        print(f"  {job.url}")
+        print()
 
     logger.info(
-        "Completed scan company=%s jobs=%s",
-        result.company,
-        len(result.jobs),
+        "Completed scan: %s companies, %s jobs, %s accepted",
+        len(config.companies),
+        len(jobs),
+        len(filtered_jobs),
     )
-    print(f"{result.company}: {len(result.jobs)} jobs found")
+
     return 0
 
 

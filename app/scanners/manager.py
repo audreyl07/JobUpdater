@@ -55,7 +55,7 @@ class ScannerManager:
             )
 
             try:
-                jobs = list(scanner.scan())
+                jobs = scanner.scan().jobs            
             except Exception as exc:  # noqa: BLE001
                 self.logger.exception(
                     "scanner_error",

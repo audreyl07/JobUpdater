@@ -2,6 +2,10 @@ filters:
   include_keywords:
     - python
     - backend
+    - java
+    - engineer
+    - c/c++
+
   exclude_keywords:
     - senior
     - manager
@@ -11,10 +15,8 @@ filters:
     - Toronto
     - Canada
     - Ottawa
-    - Montreal 
-  remote: true
-  employment_types:
-    - full-time
+    - Montreal
+  remote: false
   intern_keywords:
     - intern
     - internship
