@@ -12,8 +12,8 @@ from sqlalchemy.orm import Session
 
 from app.config.filter_loader import FilterConfigLoader
 from app.config.loader import ConfigLoader
-from app.db.repositories import JobRepository, JobSaveResult, ScanHistoryRepository
-from app.db.session import DatabaseSessionManager
+from app.repositories.job_repository import JobRepository
+from app.database.session import DatabaseSessionManager, ScanHistoryRepository
 from app.filtering.engine import FilterEngine
 from app.filtering.models import FilterRules
 from app.notifications.interfaces import NotificationProvider

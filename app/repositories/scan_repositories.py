@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.models.scan_history import ScanHistory
+from app.models.scan_history import ScanHistory, ScanStatus 
 
 logger = logging.getLogger(__name__)
 

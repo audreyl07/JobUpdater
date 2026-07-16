@@ -19,7 +19,7 @@ class Company(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
-    scanner_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    scanner: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     careers_url: Mapped[str] = mapped_column(String(2048), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
 

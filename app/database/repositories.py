@@ -11,11 +11,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.db.models import JobRecord, ScanHistoryRecord
-
-
-class RepositoryError(Exception):
-    """Raised when a repository operation fails."""
+from app.database.exceptions import RepositoryError
+from app.database.models import JobRecord, ScanHistoryRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,13 +31,7 @@ class JobRepository:
         self.logger = logger or getLogger(__name__)
 
     def save(self, job: object) -> JobSaveResult:
-        """Save a job if it does not already exist.
-
-        If a job with the same job_id already exists, return the existing record
-        and mark it as not new.
-        """
         job_id = self._get_required_text(job, "job_id")
-
         existing = self.get_by_job_id(job_id)
         if existing is not None:
             return JobSaveResult(record=existing, is_new=False)
@@ -68,7 +59,6 @@ class JobRepository:
         return JobSaveResult(record=record, is_new=True)
 
     def get_by_job_id(self, job_id: str) -> JobRecord | None:
-        """Return a job record by job_id, or None if missing."""
         statement = select(JobRecord).where(JobRecord.job_id == job_id)
         return self.session.execute(statement).scalar_one_or_none()
 
@@ -85,9 +75,7 @@ class JobRepository:
             "source": self._get_optional_text(job, "source"),
             "posted_at": self._get_optional_datetime(job, "posted_at"),
         }
-        payload["payload"] = {
-            key: value for key, value in payload.items()
-        }
+        payload["payload"] = {key: value for key, value in payload.items()}
         return payload
 
     def _get_required_text(self, job: object, field_name: str) -> str:
