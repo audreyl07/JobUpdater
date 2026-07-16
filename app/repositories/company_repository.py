@@ -29,13 +29,13 @@ class CompanyRepository:
         self,
         *,
         name: str,
-        scanner_type: str,
+        scanner: str,
         careers_url: str,
         active: bool = True,
     ) -> Company:
         company = Company(
             name=name,
-            scanner_type=scanner_type,
+            scanner=scanner,
             careers_url=careers_url,
             active=active,
         )
@@ -48,18 +48,26 @@ class CompanyRepository:
         company: Company,
         *,
         name: str | None = None,
-        scanner_type: str | None = None,
+        scanner: str | None = None,
         careers_url: str | None = None,
         active: bool | None = None,
     ) -> Company:
         if name is not None:
             company.name = name
-        if scanner_type is not None:
-            company.scanner_type = scanner_type
+        if scanner is not None:
+            company.scanner_type = scanner
         if careers_url is not None:
             company.careers_url = careers_url
         if active is not None:
             company.active = active
 
         self.session.flush()
+        return company
+
+    def get_or_create(self, *, name: str, scanner: str, careers_url: str) -> Company:
+        company = self.session.scalar(select(Company).where(Company.name == name))
+        if company is None:
+            company = Company(name=name, scanner=scanner, careers_url=careers_url)
+            self.session.add(company)
+            self.session.flush()
         return company

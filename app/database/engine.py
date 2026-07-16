@@ -36,7 +36,7 @@ class DatabaseSettings:
         if raw_value is None or not raw_value.strip():
             raise DatabaseConfigurationError(
                 f"{env_var} is not set. Expected a PostgreSQL URL like "
-                f'"{POSTGRESQL_PSYCOPG_PREFIX}user:password@localhost/career_monitor".'
+                f'"{POSTGRESQL_PSYCOPG_PREFIX}user:applicationssuck@localhost/career_monitor".'
             )
 
         return cls(url=validate_database_url(raw_value.strip()))
@@ -69,7 +69,7 @@ def validate_database_url(database_url: str) -> str:
     except Exception as exc:  # SQLAlchemy URL parsing raises ValueError-like errors
         raise DatabaseConfigurationError(
             "DATABASE_URL is malformed. Expected format: "
-            f'"{POSTGRESQL_PSYCOPG_PREFIX}user:password@host:5432/database".'
+            f'"{POSTGRESQL_PSYCOPG_PREFIX}user:applicationssuck@host:5432/career_monitor".'
         ) from exc
 
     if url.drivername != "postgresql+psycopg":
@@ -83,7 +83,12 @@ def validate_database_url(database_url: str) -> str:
     if not url.database:
         raise DatabaseConfigurationError("DATABASE_URL is missing a database name.")
 
-    return str(url)
+    # NOTE (fixed): str(url) masks the password by default in SQLAlchemy 2.x
+    # (renders as "user:***@host"). Returning that here would mean every
+    # downstream create_engine() call connects with the literal string
+    # "***" as the password instead of the real one. render_as_string
+    # with hide_password=False is required to get a connectable URL back.
+    return url.render_as_string(hide_password=False)
 
 
 def redact_database_url(database_url: str) -> str:

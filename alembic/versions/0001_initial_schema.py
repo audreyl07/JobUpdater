@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from alembic import op
 import sqlalchemy as sa
-
+from sqlalchemy.dialects import postgresql
 # revision identifiers, used by Alembic.
 revision = "0001_initial_schema"
 down_revision = None
@@ -26,22 +26,22 @@ branch_labels = None
 depends_on = None
 
 
-job_status_enum = sa.Enum("ACTIVE", "REMOVED", name="job_status")
-scan_status_enum = sa.Enum("RUNNING", "SUCCESS", "FAILED", name="scan_status")
+
+
+job_status_enum = postgresql.ENUM("ACTIVE","REMOVED",name="job_status",)
+
+scan_status_enum = postgresql.ENUM("RUNNING","SUCCESS","FAILED",name="scan_status",)
 
 
 def upgrade() -> None:
-    bind = op.get_bind()
-    job_status_enum.create(bind, checkfirst=True)
-    scan_status_enum.create(bind, checkfirst=True)
 
     op.create_table(
         "companies",
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("name", sa.String(length=255), nullable=False, unique=True),
-        sa.Column("career_site_url", sa.String(length=2048), nullable=False),
+        sa.Column("careers_url", sa.String(length=2048), nullable=False),
         sa.Column("scanner_type", sa.String(length=100), nullable=False),
-        sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.true()),
+        sa.Column("active", sa.Boolean(), nullable=False, server_default=sa.true()),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -145,24 +145,29 @@ def upgrade() -> None:
             sa.ForeignKey("jobs.id", ondelete="CASCADE"),
             nullable=False,
         ),
+        sa.Column("notification_type", sa.String(length=100), nullable=False),
         sa.Column(
-            "company_id",
-            sa.Integer(),
-            sa.ForeignKey("companies.id", ondelete="CASCADE"),
-            nullable=False,
-        ),
-        sa.Column("reason", sa.String(length=100), nullable=False),
-        sa.Column(
-            "notified_at",
+            "created_at",
             sa.DateTime(timezone=True),
             nullable=False,
             server_default=sa.func.now(),
         ),
-        # One notification per job: enforces dedup at the DB level in
-        # addition to the application-level check in NotificationRepository.
-        sa.UniqueConstraint("job_id", name="uq_notifications_job_id"),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+        # Dedup key: NotificationRepository.exists()/create_if_missing() key
+        # on (job_id, notification_type). notification_type itself encodes
+        # the event ("new_job", "content_change:{hash}"), so this constraint
+        # blocks true duplicates while still allowing a job to be notified
+        # again after a later, distinct content change.
+        sa.UniqueConstraint(
+            "job_id", "notification_type", name="uq_notifications_job_type"
+        ),
     )
-    op.create_index("ix_notifications_company_id", "notifications", ["company_id"])
+    op.create_index("ix_notifications_job_id", "notifications", ["job_id"])
 
 
 def downgrade() -> None:
@@ -171,7 +176,3 @@ def downgrade() -> None:
     op.drop_table("job_hashes")
     op.drop_table("jobs")
     op.drop_table("companies")
-
-    bind = op.get_bind()
-    scan_status_enum.drop(bind, checkfirst=True)
-    job_status_enum.drop(bind, checkfirst=True)

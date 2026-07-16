@@ -9,8 +9,7 @@ from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright
 from app.scanners.base import BaseScanner, DataSource, ScanResult, ScannerError
 
-from app.models.job import EmploymentType, Job
-from app.scanners.base import DataSource, ScanResult, ScannerError
+from app.models.job import EmploymentType, NormalizedJob
 from app.scanners.workday_discovery import WorkdayDiscovery, WorkdayEndpoint
 
 
@@ -154,8 +153,8 @@ class WorkdayScanner(BaseScanner):
             return int(payload["total"])
         raise ScannerError("Could not determine total job count")
 
-    def normalize(self, raw: dict[str, Any]) -> Job | None:
-        """Convert raw Workday job (list-endpoint shape) into our Job model."""
+    def normalize(self, raw: dict[str, Any]) -> NormalizedJob | None:
+        """Convert raw Workday job (list-endpoint shape) into our NormalizedJob model."""
         print(json.dumps(raw, indent=2))
         external_path = raw.get("externalPath")
         title = raw.get("title")
@@ -177,7 +176,7 @@ class WorkdayScanner(BaseScanner):
         # postedOn is a relative string like "Posted 6 Days Ago" — not a parseable date
         posted_at = None
 
-        return Job(
+        return NormalizedJob(
             job_id=job_id,
             company=self.company_name,
             title=title,
@@ -188,5 +187,3 @@ class WorkdayScanner(BaseScanner):
             posted_date=posted_at,
             employment_type=EmploymentType.UNKNOWN,
         )
-
-    

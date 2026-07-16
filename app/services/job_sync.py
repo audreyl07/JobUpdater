@@ -2,28 +2,24 @@
 
 Sits between the filtering stage and the notification stage:
 
-    discover -> normalize -> filter -> [ this service ] -> notify -> record history
+    discover -> normalize -> filter -> [this service] -> notify -> record history
 
-Owns no Session directly — all persistence goes through
-CompanyRepository / JobRepository / NotificationRepository / ScanRepository,
-per the "repositories are the only code that touches Session" rule.
-
-ASSUMPTIONS (adjust if your actual models differ):
-  - Job model has: id, company_id, external_job_id, title, location,
-    description, department, salary, employment_type, content_hash,
-    status (JobStatus.ACTIVE / JobStatus.REMOVED), first_seen, last_seen.
-  - JobRepository exposes:
-      get_all_for_company(company_id) -> list[Job]
-      bulk_insert(jobs: list[Job]) -> None
-      bulk_update(jobs: list[Job]) -> None   # updates already-attached ORM objects
-  - NotificationRepository exposes:
-      has_notified(job_id: int) -> bool
-      create(job_id: int, company_id: int, reason: str) -> Notification
-  - ScannedJob (scanner output, post-filter) has the same field names as
-    Job's content fields, plus `external_job_id`.
-
-If any of these don't match your real repositories/models, tell me the
-actual signatures and I'll patch this file.
+Key design facts confirmed from your real files:
+  - Scanner produces Job dataclasses (job_id, company string, title, etc.)
+  - ORM Job uses external_job_id, company_id FK, and a one-to-one JobHash
+    relationship for content hashing — NOT a content_hash column directly.
+  - JobRepository.preload_by_company() eagerly loads hash_record via
+    joinedload, so no per-job hash queries are needed in the diff loop.
+  - JobRepository.update() accepts keyword-only fields; update_many()
+    just flushes already-mutated ORM objects.
+  - JobRepository.mark_removed_many() sets status = REMOVED and flushes.
+  - NotificationRepository.create_if_missing(job_id, notification_type)
+    is the atomic dedup primitive.
+  - notification_type encodes the specific change so the (job_id,
+    notification_type) unique constraint deduplicates same-event re-sends
+    without blocking future distinct-change notifications.
+  - Scanner Job.company is a string name; CompanyRepository is used to
+    resolve it to a company_id in main.py before calling sync().
 """
 
 from __future__ import annotations
@@ -32,36 +28,30 @@ import hashlib
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Iterable, Protocol
+from typing import TYPE_CHECKING, Sequence
 
 from sqlalchemy.orm import Session
 
-from app.models.job import Job, JobStatus
+from app.models.job import Job as OrmJob
+from app.models.job import JobHash, JobStatus
 from app.repositories.job_repository import JobRepository
 from app.repositories.notification_repository import NotificationRepository
-from app.repositories.scan_repository import (
-    ScanPersistenceError,
-    ScanRepository,
-)
+from app.repositories.scan_repositories import ScanPersistenceError, ScanRepository
+
+if TYPE_CHECKING:
+    from app.models.job import Job as ScannedJob  # the scanner dataclass
 
 logger = logging.getLogger(__name__)
 
-# Fields that participate in the content hash. Timestamps are deliberately
-# excluded so unchanged postings don't register as "updated".
-_HASHED_FIELDS = ("title", "location", "description", "department", "salary", "employment_type")
-
-
-class ScannedJob(Protocol):
-    """Structural type for filtered scanner output. Matches Job's content fields."""
-
-    external_job_id: str
-    title: str
-    location: str | None
-    description: str | None
-    department: str | None
-    salary: str | None
-    employment_type: str | None
-    url: str | None
+# Fields that participate in the content hash.
+# Timestamps and status are deliberately excluded.
+_HASHED_FIELDS = (
+    "title",
+    "location",
+    "department",
+    "description",
+    "url",
+)
 
 
 class JobSyncError(Exception):
@@ -69,7 +59,7 @@ class JobSyncError(Exception):
 
 
 class JobSyncTransactionError(JobSyncError):
-    """Raised when the sync transaction fails and is rolled back."""
+    """Raised when the sync transaction fails; caller should roll back."""
 
 
 @dataclass
@@ -82,29 +72,37 @@ class SyncSummary:
     jobs_added: int = 0
     jobs_updated: int = 0
     jobs_removed: int = 0
-    jobs_to_notify: list[Job] = field(default_factory=list)
+    jobs_to_notify: list[OrmJob] = field(default_factory=list)
+
+    def __repr__(self) -> str:
+        return (
+            f"SyncSummary(company_id={self.company_id}, scan_id={self.scan_id}, "
+            f"found={self.jobs_found}, added={self.jobs_added}, "
+            f"updated={self.jobs_updated}, removed={self.jobs_removed}, "
+            f"notify={len(self.jobs_to_notify)})"
+        )
 
 
-def compute_content_hash(job: ScannedJob) -> str:
-    """SHA256 over normalized content fields, ignoring timestamps.
+def compute_content_hash(job: "ScannedJob") -> str:
+    """SHA256 over normalized content fields, ignoring timestamps and status.
 
-    Normalization: lowercase, strip whitespace, treat None as empty string.
+    Normalization: lowercase + strip, None treated as empty string.
     Field order is fixed so the hash is deterministic.
+    Unit-separator (\\x1f) between fields prevents cross-field collision.
     """
     parts = []
     for field_name in _HASHED_FIELDS:
         value = getattr(job, field_name, None) or ""
         parts.append(value.strip().lower())
-    payload = "\x1f".join(parts)  # unit-separator avoids field collision
+    payload = "\x1f".join(parts)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 class JobSyncService:
     """Diffs filtered scanner output against stored jobs for one company.
 
-    One instance call = one company scan = one transaction. The caller
-    (orchestration entry point) is expected to commit the session after
-    `sync` returns successfully, and roll back if it raises.
+    One .sync() call = one company scan = one transaction boundary.
+    The caller (main.py) owns commit/rollback via session_scope().
     """
 
     def __init__(self, session: Session) -> None:
@@ -113,18 +111,24 @@ class JobSyncService:
         self._notifications = NotificationRepository(session)
         self._scans = ScanRepository(session)
 
-    def sync(self, company_id: int, scanned_jobs: Iterable[ScannedJob]) -> SyncSummary:
+    def sync(
+        self,
+        company_id: int,
+        scanned_jobs: Sequence["ScannedJob"],
+    ) -> SyncSummary:
         """Sync one company's filtered scan results into the database.
 
         Steps:
-          1. begin_scan
-          2. preload existing jobs for company keyed by external_job_id
-          3. diff: insert new / update changed / touch unchanged / remove missing
-          4. determine notification-worthy jobs, deduped via NotificationRepository
-          5. save_statistics + record_success (or record_failure on error)
+          1. Begin scan history row (RUNNING).
+          2. Preload all existing ORM jobs for the company (one query,
+             hash_record eagerly loaded).
+          3. Diff: insert new / update changed / touch unchanged /
+             mark missing as REMOVED / notify reappeared.
+          4. Deduplicate notifications via NotificationRepository.
+          5. Save statistics + record SUCCESS (or FAILED on error).
 
-        Raises JobSyncTransactionError on failure; caller should roll back
-        the session in that case.
+        Raises JobSyncTransactionError on failure; session_scope() in
+        main.py will roll back.
         """
         scanned_jobs = list(scanned_jobs)
         scan = self._scans.begin_scan(company_id)
@@ -140,8 +144,8 @@ class JobSyncService:
             )
             self._scans.record_success(scan.id)
             logger.info(
-                "Sync complete: company_id=%s scan_id=%s found=%s added=%s "
-                "updated=%s removed=%s notify=%s",
+                "Sync complete: company_id=%s scan_id=%s found=%s "
+                "added=%s updated=%s removed=%s notify=%s",
                 company_id,
                 scan.id,
                 summary.jobs_found,
@@ -151,9 +155,13 @@ class JobSyncService:
                 len(summary.jobs_to_notify),
             )
             return summary
-        except Exception as exc:  # noqa: BLE001 - intentional: wrap everything
+
+        except Exception as exc:
             logger.error(
-                "Sync failed for company_id=%s scan_id=%s: %s", company_id, scan.id, exc
+                "Sync failed: company_id=%s scan_id=%s error=%s",
+                company_id,
+                scan.id,
+                exc,
             )
             try:
                 self._scans.record_failure(scan.id, str(exc))
@@ -168,83 +176,110 @@ class JobSyncService:
     # -- internals ----------------------------------------------------------
 
     def _diff_and_apply(
-        self, company_id: int, scan_id: int, scanned_jobs: list[ScannedJob]
+        self,
+        company_id: int,
+        scan_id: int,
+        scanned_jobs: list["ScannedJob"],
     ) -> SyncSummary:
         now = datetime.now(timezone.utc)
-        existing_by_ext_id: dict[str, Job] = {
-            job.external_job_id: job
-            for job in self._jobs.get_all_for_company(company_id)
-        }
+
+        # One query, hash_record eagerly loaded — no per-job queries below.
+        existing_by_ext_id: dict[str, OrmJob] = self._jobs.preload_by_company(company_id)
         seen_ext_ids: set[str] = set()
 
-        to_insert: list[Job] = []
-        to_update: list[Job] = []
-        to_notify: list[Job] = []
+        to_insert: list[OrmJob] = []
+        insert_hashes: list[str] = []
+        to_notify: list[tuple[OrmJob, str]] = []
         changed_count = 0
-        touched_count = 0
 
         for scanned in scanned_jobs:
-            seen_ext_ids.add(scanned.external_job_id)
+            ext_id = scanned.job_id
+            seen_ext_ids.add(ext_id)
             new_hash = compute_content_hash(scanned)
-            existing = existing_by_ext_id.get(scanned.external_job_id)
+            existing = existing_by_ext_id.get(ext_id)
 
             if existing is None:
-                job = Job(
+                # Brand new job.
+                orm_job = OrmJob(
                     company_id=company_id,
-                    external_job_id=scanned.external_job_id,
+                    external_job_id=ext_id,
                     title=scanned.title,
                     location=scanned.location,
-                    description=scanned.description,
                     department=scanned.department,
-                    salary=scanned.salary,
-                    employment_type=scanned.employment_type,
-                    url=getattr(scanned, "url", None),
-                    content_hash=new_hash,
+                    description=scanned.description,
+                    url=scanned.url,
+                    posted_date=getattr(scanned, "posted_date", None),
                     status=JobStatus.ACTIVE,
                     first_seen=now,
                     last_seen=now,
                 )
-                to_insert.append(job)
-                to_notify.append(job)
+                to_insert.append(orm_job)
+                insert_hashes.append(new_hash)
+                to_notify.append((orm_job, "new_job"))
                 continue
 
-            if existing.content_hash != new_hash:
-                existing.title = scanned.title
-                existing.location = scanned.location
-                existing.description = scanned.description
-                existing.department = scanned.department
-                existing.salary = scanned.salary
-                existing.employment_type = scanned.employment_type
-                existing.content_hash = new_hash
-                existing.status = JobStatus.ACTIVE
-                existing.last_seen = now
-                to_update.append(existing)
-                to_notify.append(existing)
+            current_hash = (
+                existing.hash_record.content_hash
+                if existing.hash_record is not None
+                else None
+            )
+
+            was_removed = existing.status == JobStatus.REMOVED
+
+            if current_hash != new_hash:
+                # Content changed (or hash was missing) — update all fields.
+                notification_type = (
+                    "job_reappeared" if was_removed else f"content_change:{new_hash}"
+                )
+                self._jobs.update(
+                    existing,
+                    title=scanned.title,
+                    location=scanned.location,
+                    department=scanned.department,
+                    description=scanned.description,
+                    url=scanned.url,
+                    posted_date=getattr(scanned, "posted_date", None),
+                    last_seen=now,
+                    status=JobStatus.ACTIVE,
+                    content_hash=new_hash,
+                )
+                to_notify.append((existing, notification_type))
                 changed_count += 1
             else:
-                existing.last_seen = now
-                if existing.status != JobStatus.ACTIVE:
-                    existing.status = JobStatus.ACTIVE
-                to_update.append(existing)
-                touched_count += 1
+                # Content unchanged — touch last_seen and reactivate if needed.
+                if was_removed:
+                    # Job reappeared with identical content to when it was last
+                    # active. Still notify — the absence itself was meaningful.
+                    self._jobs.update(
+                        existing,
+                        last_seen=now,
+                        status=JobStatus.ACTIVE,
+                    )
+                    to_notify.append((existing, "job_reappeared"))
+                    changed_count += 1
+                else:
+                    existing.last_seen = now
 
-        removed: list[Job] = []
-        for ext_id, job in existing_by_ext_id.items():
-            if ext_id not in seen_ext_ids and job.status != JobStatus.REMOVED:
-                job.status = JobStatus.REMOVED
-                removed.append(job)
-                to_update.append(job)
-
+        # Bulk insert new jobs with their hashes.
         if to_insert:
-            self._jobs.bulk_insert(to_insert)
-        if to_update:
-            self._jobs.bulk_update(to_update)
+            self._jobs.insert_many(to_insert, content_hashes=insert_hashes)
 
-        logger.debug(
-            "Diff detail: unchanged_touched=%s changed=%s", touched_count, changed_count
-        )
+        # Mark jobs absent from this scan as REMOVED.
+        removed_count = 0
+        to_remove = [
+            job
+            for ext_id, job in existing_by_ext_id.items()
+            if ext_id not in seen_ext_ids and job.status != JobStatus.REMOVED
+        ]
+        if to_remove:
+            self._jobs.mark_removed_many(to_remove)
+            removed_count = len(to_remove)
 
-        deduped_notify = self._dedupe_notifications(company_id, to_notify)
+        # Flush touches (last_seen only, no explicit repo call needed since
+        # session_scope commits; flush here so IDs are available for dedup).
+        self._session.flush()
+
+        deduped_notify = self._dedupe_notifications(to_notify)
 
         return SyncSummary(
             company_id=company_id,
@@ -252,20 +287,31 @@ class JobSyncService:
             jobs_found=len(scanned_jobs),
             jobs_added=len(to_insert),
             jobs_updated=changed_count,
-            jobs_removed=len(removed),
+            jobs_removed=removed_count,
             jobs_to_notify=deduped_notify,
         )
 
-    def _dedupe_notifications(self, company_id: int, candidates: list[Job]) -> list[Job]:
-        """Filter candidates down to jobs that haven't already been notified."""
-        result: list[Job] = []
-        for job in candidates:
-            if self._notifications.has_notified(job.id):
-                continue
-            self._notifications.create(
-                job_id=job.id,
-                company_id=company_id,
-                reason="new_or_updated_job",
+    def _dedupe_notifications(
+        self, candidates: list[tuple[OrmJob, str]]
+    ) -> list[OrmJob]:
+        """Create notification rows for candidates that haven't been sent yet.
+
+        notification_type encodes the specific event:
+          "new_job"                  — first time this external_job_id appeared
+          "content_change:{hash}"    — content changed (hash is the NEW hash)
+          "job_reappeared"           — previously REMOVED, now back in the feed
+
+        The (job_id, notification_type) unique constraint on the notifications
+        table ensures identical events are never double-sent even under
+        concurrent scans. create_if_missing() exploits that constraint rather
+        than doing an explicit SELECT before every INSERT.
+        """
+        result: list[OrmJob] = []
+        for orm_job, notification_type in candidates:
+            notification = self._notifications.create_if_missing(
+                job_id=orm_job.id,
+                notification_type=notification_type,
             )
-            result.append(job)
+            if notification is not None:
+                result.append(orm_job)
         return result

@@ -11,7 +11,7 @@ class CompanyConfig:
     """Validated company scanner configuration."""
 
     name: str
-    scanner: str
+    scanner: str 
     url: str
 
 

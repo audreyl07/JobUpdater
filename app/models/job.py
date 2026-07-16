@@ -2,7 +2,7 @@
 Normalized Job model.
 
 Every scanner in this application (IBM, Cisco, Nokia, ...) must return a
-list of `Job` objects. Scanners are FORBIDDEN from leaking raw,
+list of `NormalizedJob` objects. Scanners are FORBIDDEN from leaking raw,
 company-specific API/HTML shapes past their own `normalize()` method.
 This is what makes the rest of the system (filters, database, scheduler,
 notifications) company-agnostic.
@@ -21,6 +21,7 @@ Design notes:
 
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -42,16 +43,32 @@ class JobStatus:
     EXPIRED = "EXPIRED"
 
 
+class EmploymentType(enum.Enum):
+    """Canonical employment-type values used across scanners and filters."""
+
+    UNKNOWN = "UNKNOWN"
+    FULL_TIME = "FULL_TIME"
+    PART_TIME = "PART_TIME"
+    CONTRACT = "CONTRACT"
+    INTERN = "INTERN"
+
+
 @dataclass(slots=True)
-class Job:
-    """Standardized job record returned by scanners."""
+class NormalizedJob:
+    """Standardized job record returned by scanners.
+
+    Named `NormalizedJob` (rather than `Job`) to avoid colliding with the
+    persisted SQLAlchemy `Job` model defined later in this module - the two
+    represent different things (scanner output vs. a DB row) and must stay
+    distinguishable in imports.
+    """
 
     job_id: str
     title: str
     company: str
     location: str
     department: str | None = None
-   #  employment_type: EmploymentType = EmploymentType.UNKNOWN
+    employment_type: EmploymentType = EmploymentType.UNKNOWN
     posted_date: datetime | None = None
     url: str = ""
     description: str | None = None
@@ -147,4 +164,3 @@ class JobHash(Base):
 
     def __repr__(self) -> str:
         return f"JobHash(job_id={self.job_id!r}, content_hash={self.content_hash!r})"
-

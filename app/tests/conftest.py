@@ -1,11 +1,11 @@
 """Shared pytest fixtures. Tests run against SQLite in-memory by default.
 
-ASSUMPTIONS (adjust import paths if your layout differs):
-  - app.db.base.Base is the declarative base.
-  - app.models.company.Company, app.models.job.Job / JobStatus,
-    app.models.scan_history.ScanHistory / ScanStatus,
-    app.models.notification.Notification exist and are importable
-    (they're in your "already implemented" list).
+Confirmed against your real files:
+  - app.database.base.Base / TimestampMixin
+  - app.models.company.Company (name, scanner, careers_url, active)
+
+Still-unconfirmed (used per the assumptions documented in job_sync_service.py
+and job_repository.py): Job, ScanHistory, Notification field names.
 
 SQLite caveat: native Postgres ENUM types (job_status, scan_status) become
 plain VARCHAR under SQLite — fine for these tests since we only assert on
@@ -18,8 +18,13 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.db.base import Base
+from app.database.base import Base
 from app.models.company import Company
+
+# Import all model modules so Base.metadata is fully populated before
+# create_all() runs — otherwise tables that are only reachable via
+# relationship() TYPE_CHECKING imports won't be created.
+from app.models import job, notification, scan_history  # noqa: F401
 
 
 @pytest.fixture()
@@ -45,9 +50,9 @@ def company(session) -> Company:
     """A minimal persisted company row for tests that need a company_id."""
     c = Company(
         name="Acme Corp",
-        career_site_url="https://acme.example.com/careers",
-        scanner_type="workday",
-        is_active=True,
+        careers_url="https://acme.example.com/careers",
+        scanner="workday",
+        active=True,
     )
     session.add(c)
     session.flush()

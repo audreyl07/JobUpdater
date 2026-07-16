@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.models.scan_history import ScanHistory, ScanStatus
+from app.models.scan_history import ScanHistory
 
 logger = logging.getLogger(__name__)
 
@@ -208,11 +208,11 @@ class ScanRepository:
 
     @staticmethod
     def _redact(message: str) -> str:
-        """Strip credentials from postgresql+psycopg:// URLs in error text."""
+        """Strip credentials from any scheme://user:pass@ URL in error text."""
         import re
 
         return re.sub(
-            r"(postgresql\+psycopg://)[^@/]+@",
+            r"([a-zA-Z][\w+.-]*://)[^@/\s]+@",
             r"\1***:***@",
             message,
         )

@@ -1,3 +1,3 @@
-from app.models.job import EmploymentType, Job
+from app.models.job import EmploymentType, NormalizedJob
 
 __all__ = ["Job", "EmploymentType"]

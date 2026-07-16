@@ -1,36 +1,30 @@
 """Alembic migration environment for JobUpdater.
 
 Wires Alembic to the SQLAlchemy `Base` metadata and to the same
-`DATABASE_URL` validation used by the application at runtime, so a
-migration can never run against an unvalidated or malformed URL.
-
-ASSUMPTIONS (adjust imports if your actual module layout differs):
-  - app.db.engine exposes `get_validated_database_url() -> str`, which
-    performs the same eager validation described in the spec (must start
-    with "postgresql+psycopg://", raises on malformed URLs). This is the
-    "already implemented" engine.py from your project.
-  - app.db.base exposes `Base` (the declarative base all models inherit).
-  - Models are imported here purely for their side effect of registering
-    tables on `Base.metadata` — required for `alembic revision --autogenerate`
-    to see them.
-
-If your engine.py's validation function has a different name/location,
-tell me and I'll adjust the import.
+DATABASE_URL validation used by the application at runtime (app.database.engine),
+so a migration can never run against an invalidated or malformed URL, and
+never logs raw credentials.
 """
 
 from __future__ import annotations
 
 import logging
-import re
+import os
+import sys
 from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-# --- Import Base and all models so Base.metadata is fully populated -----
-from app.db.base import Base  # noqa: E402
-from app.db.engine import get_validated_database_url  # noqa: E402
-from app.models import company, job, notification, scan_history  # noqa: E402,F401
+# Ensure the project root (parent of this alembic/ dir) is on sys.path
+# so `app` can be imported regardless of the current working directory.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from app.database.base import Base  # noqa: E402
+from app.database.engine import DatabaseSettings  # noqa: E402
+
+# Import all model modules so Base.metadata is fully populated for autogenerate.
+from app.models import company, job, notification, scan_history  # noqa: F401, E402
 
 config = context.config
 
@@ -42,21 +36,17 @@ logger = logging.getLogger("alembic.env")
 target_metadata = Base.metadata
 
 
-def _redact(url: str) -> str:
-    """Strip credentials from a DB URL before it ever touches a log line."""
-    return re.sub(r"(postgresql\+psycopg://)[^@/]+@", r"\1***:***@", url)
-
-
 def _resolve_database_url() -> str:
-    """Fetch and validate DATABASE_URL using the app's own validation logic.
+    """Fetch and validate DATABASE_URL using the app's own DatabaseSettings.
 
-    Reusing get_validated_database_url() (rather than re-implementing the
-    "postgresql+psycopg://" check here) guarantees migrations and the
-    running app can never disagree about what a valid URL looks like.
+    Reusing DatabaseSettings.from_env() (rather than reimplementing the
+    validation here) guarantees migrations and the running app can never
+    disagree about what a valid URL looks like, and reuses the app's own
+    credential redaction for logging.
     """
-    url = get_validated_database_url()
-    logger.info("Alembic using database: %s", _redact(url))
-    return url
+    settings = DatabaseSettings.from_env()
+    logger.info("Alembic using database: %s", settings.redacted_url())
+    return settings.url
 
 
 def run_migrations_offline() -> None:
